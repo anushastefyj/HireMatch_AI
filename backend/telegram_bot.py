@@ -214,230 +214,251 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     session = get_session(user_id)
     
-    if not session.get("job_description"):
-        await update.message.reply_text("Please provide the Job Description first.")
+    jds = session.get("job_descriptions", [])
+    if not jds:
+        await update.message.reply_text("Please provide at least one Job Description first using /jd.")
         return
         
     resumes = session.get("resumes", [])
     failed = session.get("failed_uploads", [])
     
     if not resumes and not failed:
-        await update.message.reply_text("Please upload at least one PDF or DOCX resume first.")
+        await update.message.reply_text("Please upload at least one PDF or DOCX resume first using /resume.")
         return
     elif not resumes and failed:
         await update.message.reply_text(f"0 resumes added. {len(failed)} file(s) could not be processed. Please upload valid resumes.")
         return
         
-    targets = []
-    if context.args and context.args[0].isdigit():
-        idx = int(context.args[0])
-        if 1 <= idx <= len(resumes):
-            targets.append((idx, resumes[idx-1]))
+    # Pre-extract all resumes
+    valid_resumes = []
+    for r in resumes:
+        if "text" in r:
+            valid_resumes.append(r)
+            continue
+        path = r.get("path", "")
+        if os.path.exists(path):
+            text = extract_resume_text(path)
+            if text and len(text.strip()) > 20:
+                r["text"] = text
+                valid_resumes.append(r)
+            else:
+                failed.append(r["filename"])
         else:
-            await update.message.reply_text(f"Resume {idx} not found. You have {len(resumes)} uploaded resumes.")
-            return
-    else:
-        targets = list(enumerate(resumes, 1))
+            failed.append(r["filename"])
+            
+    num_jds = len(jds)
+    num_resumes = len(valid_resumes)
+    
+    if num_resumes == 0:
+        await update.message.reply_text(f"0 resumes successfully extracted. {len(failed)} file(s) failed extraction.")
+        return
+
+    total_comparisons = num_jds * num_resumes
+    
+    # Initial message
+    await update.message.reply_text(
+        f"Analysis started.\n\nJob Descriptions: {num_jds}\nResumes: {num_resumes}\nTotal comparisons: {total_comparisons}"
+    )
+
+    progress_msg = await update.message.reply_text(
+        f"<b>ANALYZING...</b>\n\nProgress:\n0/{total_comparisons} completed",
+        parse_mode="HTML"
+    )
+
+    # Dictionary to hold all summaries: jd_idx -> list of dicts (name, score, report)
+    analysis_results = {}
+    
+    completed_comparisons = 0
+    success_comparisons = 0
+    failed_comparisons = 0
+    
+    from local_analyzer import analyze_resume_local
+    from gemini_service import analyze_resume_with_gemini
+    from course_recommender import get_recommendations
+    import html
+    import traceback
+
+    for jd_idx, jd in enumerate(jds, 1):
+        jd_text = jd["text"]
+        jd_filename = jd.get("filename", f"JD {jd_idx}")
         
-        # Summary message output
-        total_received = len(resumes) + len(failed)
-        if not failed:
-            summary = f"{total_received} resume{'s' if total_received > 1 else ''} received successfully.\n\nFiles:\n"
-            for i, r in enumerate(resumes, 1):
-                summary += f"{i}. {r['filename']}\n"
-            summary += "\nStarting analysis..."
-        else:
-            summary = f"{total_received} file{'s' if total_received > 1 else ''} received.\n"
-            summary += f"{len(resumes)} resume{'s' if len(resumes) != 1 else ''} {'were' if len(resumes) != 1 else 'was'} successfully added.\n"
-            summary += f"{len(failed)} file{'s' if len(failed) > 1 else ''} could not be processed:\n\n"
-            for f in failed:
-                summary += f"• {f}\n"
-            summary += f"\nStarting analysis of {len(resumes)} resume{'s' if len(resumes) != 1 else ''}..."
-        await update.message.reply_text(summary)
+        analysis_results[jd_idx] = {
+            "jd_filename": jd_filename,
+            "resumes": []
+        }
         
-    num_targets = len(targets)
-    progress_msg = None
-    if num_targets > 1 and not context.args:
-        progress_msg = await update.message.reply_text(
-            f"<b>ANALYZING {num_targets} RESUMES...</b>\n\n"
-            f"I found {num_targets} resumes.\n"
-            f"I'll evaluate each resume against the uploaded Job Description.\n\n"
-            f"Progress:\n0/{num_targets} completed",
-            parse_mode="HTML"
-        )
-    else:
-        await update.message.reply_text(f"Analyzing {num_targets} resume(s) using HireMatch AI...\n\nThis may take a moment.")
-    
-    jd_text = session["job_description"]
-    
-    success_count = 0
-    failed_count = 0
-    
-    for idx, r in targets:
-        if progress_msg:
+        for res_idx, r in enumerate(valid_resumes, 1):
+            resume_text = r["text"]
+            
             try:
-                await progress_msg.edit_text(
-                    f"<b>ANALYZING {num_targets} RESUMES...</b>\n\n"
-                    f"I found {num_targets} resumes.\n"
-                    f"I'll evaluate each resume against the uploaded Job Description.\n\n"
-                    f"Progress:\n{success_count + failed_count}/{num_targets} completed\n"
-                    f"Analyzing resume {idx}/{num_targets}...",
-                    parse_mode="HTML"
-                )
-            except Exception:
-                pass
+                local_result = analyze_resume_local(jd_text, resume_text)
+                gemini_result = analyze_resume_with_gemini(jd_text, resume_text, r["filename"])
                 
-        try:
-            print(f"\n[Resume {idx}] Parsing...")
-            print(f"[Resume {idx}] Stored filename: {r.get('filename', 'Unknown')}")
-            
-            # Handle backward compatibility (if the user didn't /reset their old session)
-            if "path" in r:
-                path = r.get("path", "")
-                print(f"[Resume {idx}] Path: {path}")
-                if os.path.exists(path):
-                    print(f"[Resume {idx}] File exists: True")
-                    print(f"[Resume {idx}] Is file: {os.path.isfile(path)}")
-                    print(f"[Resume {idx}] File size: {os.path.getsize(path)} bytes")
-                    print(f"[Resume {idx}] Extension: {os.path.splitext(path)[1]}")
+                if "error" in gemini_result:
+                    final_result = local_result
                 else:
-                    print(f"[Resume {idx}] File exists: False")
+                    final_result = local_result.copy()
                 
-                resume_text = extract_resume_text(path)
-            else:
-                print(f"[Resume {idx}] Path: Missing (Legacy session state detected)")
-                resume_text = r.get("text", "")
+                cand_name = html.escape(final_result.get("candidate_name", "Not specified"))
+                job_role = html.escape(final_result.get("job_role", "Not specified"))
+                comp_score = final_result.get("compatibility_score", 0)
+                rating = final_result.get("rating", 0.0)
+                ats_score = final_result.get("ats_score", 0)
                 
-            print(f"[Resume {idx}] Extracted characters: {len(resume_text)}")
-            
-            if not resume_text.strip():
-                failed_count += 1
-                await update.message.reply_text(
-                    f"<b>Resume #{idx}</b>\n"
-                    f"Status: Analysis could not be completed.\n"
-                    f"Reason: Resume content could not be extracted (file may be empty, unsupported, or scanned image).",
-                    parse_mode="HTML"
+                matched_req = final_result.get("matched_skills", [])
+                matched_req_str = "\n".join([f"• {html.escape(s.title())}" for s in matched_req]) if matched_req else "• None"
+                
+                missing_req = final_result.get("missing_skills", [])
+                missing_req_str = "\n".join([f"• {html.escape(s.title())}" for s in missing_req]) if missing_req else "• None"
+                
+                matched_pref = final_result.get("matched_pref_skills", [])
+                matched_pref_str = "\n".join([f"• {html.escape(s.title())}" for s in matched_pref]) if matched_pref else "• None"
+                
+                missing_pref = final_result.get("missing_pref_skills", [])
+                missing_pref_str = "\n".join([f"• {html.escape(s.title())}" for s in missing_pref]) if missing_pref else "• None"
+                
+                skill_coverage = final_result.get("skill_coverage", 0)
+                
+                breakdown_skills = final_result.get("breakdown_skills", 0)
+                breakdown_exp = final_result.get("breakdown_exp", 0)
+                breakdown_edu = final_result.get("breakdown_edu", 0)
+                breakdown_rel = final_result.get("breakdown_rel", 0)
+                breakdown_sec = final_result.get("breakdown_sections", 0)
+                breakdown_term = final_result.get("breakdown_terminology", 0)
+                
+                exp_align = html.escape(final_result.get("experience_alignment", "Not specified"))
+                edu_align = html.escape(final_result.get("education_alignment", "Not specified"))
+                
+                strengths = final_result.get("strengths", [])
+                strengths_str = "\n".join([f"• {html.escape(s)}" for s in strengths]) if strengths else "• Not specified"
+                
+                improvements = final_result.get("improvement_suggestions", [])
+                improvements_str = "\n".join([f"• {html.escape(s)}" for s in improvements]) if improvements else "• Not specified"
+                
+                recruit_summary = html.escape(final_result.get("recruitment_summary", "Not specified"))
+                
+                recommendations = get_recommendations(final_result.get("all_missing", missing_req))
+                if recommendations:
+                    rec_lines = []
+                    for rec_idx, rec in enumerate(recommendations, 1):
+                        rec_lines.append(
+                            f"<b>{rec_idx}. {html.escape(rec['title'])}</b>\n"
+                            f"Recommended for: {html.escape(rec['recommended_for'].title())}\n"
+                            f'<a href="{rec["url"]}">Start Learning</a>\n'
+                        )
+                    rec_str = "\n".join(rec_lines)
+                else:
+                    rec_str = "No major skill gaps identified based on the provided Job Description."
+                
+                ats_table = (
+                    "<b>ATS EVALUATION FRAMEWORK</b>\n\n"
+                    "• <b>Required skill/keyword match (40%)</b>\n  <i>How many important JD skills appear in the resume</i>\n"
+                    f"  Score: {breakdown_skills}%\n\n"
+                    "• <b>JD keyword coverage (20%)</b>\n  <i>Important terms from the JD appearing in the resume</i>\n"
+                    f"  Score: {breakdown_rel}%\n\n"
+                    "• <b>Education match (15%)</b>\n  <i>Degree/branch/education requirements</i>\n"
+                    f"  Score: {breakdown_edu}%\n\n"
+                    "• <b>Experience match (10%)</b>\n  <i>Fresher/experience requirements</i>\n"
+                    f"  Score: {breakdown_exp}%\n\n"
+                    "• <b>Resume sections (10%)</b>\n  <i>Skills, Education, Experience, Projects, etc.</i>\n"
+                    f"  Score: {breakdown_sec}%\n\n"
+                    "• <b>Terminology/relevance (5%)</b>\n  <i>Relevant role-specific terminology</i>\n"
+                    f"  Score: {breakdown_term}%\n\n"
+                    "Total = 100%"
                 )
-                continue
                 
-            from local_analyzer import analyze_resume_local
-            local_result = analyze_resume_local(jd_text, resume_text)
+                report = (
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"<b>JOB DESCRIPTION {jd_idx}: {html.escape(jd_filename)}</b>\n"
+                    f"<b>RESUME {res_idx}: {html.escape(r['filename'])}</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"Candidate: <b>{cand_name}</b>\n"
+                    f"Target Role: <b>{job_role}</b>\n\n"
+                    "<b>OVERALL ASSESSMENT</b>\n\n"
+                    f"Compatibility Score: {comp_score}/100\n"
+                    f"ATS Compatibility: {ats_score}/100\n"
+                    f"Overall Rating: {rating}/10\n\n"
+                    f"{ats_table}\n\n"
+                    "<b>SKILL ALIGNMENT</b>\n\n"
+                    "<u>Required Skills</u>\n"
+                    "<b>Matched Skills</b>\n"
+                    f"{matched_req_str}\n"
+                    "<b>Missing Skills</b>\n"
+                    f"{missing_req_str}\n\n"
+                    "<u>Preferred / Additional Skills</u>\n"
+                    "<b>Matched</b>\n"
+                    f"{matched_pref_str}\n"
+                    "<b>Missing</b>\n"
+                    f"{missing_pref_str}\n\n"
+                    f"<b>Skill Coverage:</b> {skill_coverage}%\n\n"
+                    "<b>EXPERIENCE ALIGNMENT</b>\n\n"
+                    f"{exp_align}\n\n"
+                    "<b>EDUCATION ALIGNMENT</b>\n\n"
+                    f"{edu_align}\n\n"
+                    "<b>KEY STRENGTHS</b>\n\n"
+                    f"{strengths_str}\n\n"
+                    "<b>AREAS FOR IMPROVEMENT</b>\n\n"
+                    f"{improvements_str}\n\n"
+                    "<b>LEARNING RECOMMENDATIONS</b>\n\n"
+                    f"{rec_str}\n"
+                    "<b>RECRUITMENT SUMMARY</b>\n\n"
+                    f"{recruit_summary}"
+                )
+                
+                analysis_results[jd_idx]["resumes"].append({
+                    "res_filename": r["filename"],
+                    "cand_name": cand_name,
+                    "ats_score": ats_score,
+                    "report": report
+                })
+                success_comparisons += 1
+                
+            except Exception as e:
+                failed_comparisons += 1
+                print(f"[JD {jd_idx} x Resume {res_idx}] Error: {e}")
+                traceback.print_exc()
+                analysis_results[jd_idx]["resumes"].append({
+                    "res_filename": r["filename"],
+                    "cand_name": "Unknown",
+                    "ats_score": 0,
+                    "report": f"━━━━━━━━━━━━━━━━━━━━\n<b>JOB DESCRIPTION {jd_idx}: {html.escape(jd_filename)}</b>\n<b>RESUME {res_idx}: {html.escape(r['filename'])}</b>\n━━━━━━━━━━━━━━━━━━━━\nStatus: Analysis failed."
+                })
+                
+            completed_comparisons += 1
             
-            gemini_result = analyze_resume_with_gemini(jd_text, resume_text, r["filename"])
-            
-            if "error" in gemini_result:
-                final_result = local_result
-            else:
-                final_result = local_result.copy()
-            
-            import html
-            
-            cand_name = html.escape(final_result.get("candidate_name", "Not specified"))
-            job_role = html.escape(final_result.get("job_role", "Not specified"))
-            comp_score = final_result.get("compatibility_score", 0)
-            rating = final_result.get("rating", 0.0)
-            ats_score = final_result.get("ats_score", 0)
-            
-            matched_req = final_result.get("matched_skills", [])
-            matched_req_str = "\n".join([f"• {html.escape(s.title())}" for s in matched_req]) if matched_req else "• None"
-            
-            missing_req = final_result.get("missing_skills", [])
-            missing_req_str = "\n".join([f"• {html.escape(s.title())}" for s in missing_req]) if missing_req else "• None"
-            
-            matched_pref = final_result.get("matched_pref_skills", [])
-            matched_pref_str = "\n".join([f"• {html.escape(s.title())}" for s in matched_pref]) if matched_pref else "• None"
-            
-            missing_pref = final_result.get("missing_pref_skills", [])
-            missing_pref_str = "\n".join([f"• {html.escape(s.title())}" for s in missing_pref]) if missing_pref else "• None"
-            
-            skill_coverage = final_result.get("skill_coverage", 0)
-            
-            breakdown_skills = final_result.get("breakdown_skills", 0)
-            breakdown_exp = final_result.get("breakdown_exp", 0)
-            breakdown_edu = final_result.get("breakdown_edu", 0)
-            breakdown_rel = final_result.get("breakdown_rel", 0)
-            breakdown_sec = final_result.get("breakdown_sections", 0)
-            breakdown_term = final_result.get("breakdown_terminology", 0)
-            
-            exp_align = html.escape(final_result.get("experience_alignment", "Not specified"))
-            edu_align = html.escape(final_result.get("education_alignment", "Not specified"))
-            
-            strengths = final_result.get("strengths", [])
-            strengths_str = "\n".join([f"• {html.escape(s)}" for s in strengths]) if strengths else "• Not specified"
-            
-            improvements = final_result.get("improvement_suggestions", [])
-            improvements_str = "\n".join([f"• {html.escape(s)}" for s in improvements]) if improvements else "• Not specified"
-            
-            recruit_summary = html.escape(final_result.get("recruitment_summary", "Not specified"))
-            
-            from course_recommender import get_recommendations
-            recommendations = get_recommendations(final_result.get("all_missing", missing_req))
-            if recommendations:
-                rec_lines = []
-                for rec_idx, rec in enumerate(recommendations, 1):
-                    rec_lines.append(
-                        f"<b>{rec_idx}. {html.escape(rec['title'])}</b>\n"
-                        f"Recommended for: {html.escape(rec['recommended_for'].title())}\n"
-                        f'<a href="{rec["url"]}">Start Learning</a>\n'
+            if progress_msg:
+                try:
+                    await progress_msg.edit_text(
+                        f"<b>ANALYZING...</b>\n\nProgress:\n{completed_comparisons}/{total_comparisons} completed",
+                        parse_mode="HTML"
                     )
-                rec_str = "\n".join(rec_lines)
-            else:
-                rec_str = "No major skill gaps identified based on the provided Job Description."
+                except Exception:
+                    pass
+
+    # Build and send summary
+    summary = f"<b>HIRING ANALYSIS SUMMARY</b>\n\nJob Descriptions: {num_jds}\nResumes: {num_resumes}\nTotal Comparisons: {total_comparisons}\n\n"
+    
+    for jd_idx in sorted(analysis_results.keys()):
+        jd_data = analysis_results[jd_idx]
+        summary += f"━━━━━━━━━━━━━━━━━━\n<b>JD {jd_idx}: {html.escape(jd_data['jd_filename'])}</b>\n\n"
+        for idx, res in enumerate(jd_data["resumes"], 1):
+            summary += f"Resume {idx} - {html.escape(res['cand_name'])}\nATS Score: {res['ats_score']}/100\n\n"
             
-            ats_table = (
-                "<b>ATS EVALUATION FRAMEWORK</b>\n\n"
-                "• <b>Required skill/keyword match (40%)</b>\n  <i>How many important JD skills appear in the resume</i>\n"
-                f"  Score: {breakdown_skills}%\n\n"
-                "• <b>JD keyword coverage (20%)</b>\n  <i>Important terms from the JD appearing in the resume</i>\n"
-                f"  Score: {breakdown_rel}%\n\n"
-                "• <b>Education match (15%)</b>\n  <i>Degree/branch/education requirements</i>\n"
-                f"  Score: {breakdown_edu}%\n\n"
-                "• <b>Experience match (10%)</b>\n  <i>Fresher/experience requirements</i>\n"
-                f"  Score: {breakdown_exp}%\n\n"
-                "• <b>Resume sections (10%)</b>\n  <i>Skills, Education, Experience, Projects, etc.</i>\n"
-                f"  Score: {breakdown_sec}%\n\n"
-                "• <b>Terminology/relevance (5%)</b>\n  <i>Relevant role-specific terminology</i>\n"
-                f"  Score: {breakdown_term}%\n\n"
-                "Total = 100%"
-            )
-            
-            report = (
-                f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"<b>RESUME {idx} OF {len(resumes)}</b>\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"Candidate: <b>{cand_name}</b>\n"
-                f"Target Role: <b>{job_role}</b>\n\n"
-                "<b>OVERALL ASSESSMENT</b>\n\n"
-                f"Compatibility Score: {comp_score}/100\n"
-                f"ATS Compatibility: {ats_score}/100\n"
-                f"Overall Rating: {rating}/10\n\n"
-                f"{ats_table}\n\n"
-                "<b>SKILL ALIGNMENT</b>\n\n"
-                "<u>Required Skills</u>\n"
-                "<b>Matched Skills</b>\n"
-                f"{matched_req_str}\n"
-                "<b>Missing Skills</b>\n"
-                f"{missing_req_str}\n\n"
-                "<u>Preferred / Additional Skills</u>\n"
-                "<b>Matched</b>\n"
-                f"{matched_pref_str}\n"
-                "<b>Missing</b>\n"
-                f"{missing_pref_str}\n\n"
-                f"<b>Skill Coverage:</b> {skill_coverage}%\n\n"
-                "<b>EXPERIENCE ALIGNMENT</b>\n\n"
-                f"{exp_align}\n\n"
-                "<b>EDUCATION ALIGNMENT</b>\n\n"
-                f"{edu_align}\n\n"
-                "<b>KEY STRENGTHS</b>\n\n"
-                f"{strengths_str}\n\n"
-                "<b>AREAS FOR IMPROVEMENT</b>\n\n"
-                f"{improvements_str}\n\n"
-                "<b>LEARNING RECOMMENDATIONS</b>\n\n"
-                f"{rec_str}\n"
-                "<b>RECRUITMENT SUMMARY</b>\n\n"
-                f"{recruit_summary}"
-            )
-            
+    if len(summary) > 4000:
+        parts = [summary[i:i+4000] for i in range(0, len(summary), 4000)]
+        for part in parts:
+            try:
+                await update.message.reply_text(part, parse_mode="HTML")
+            except Exception:
+                await update.message.reply_text(part)
+    else:
+        await update.message.reply_text(summary, parse_mode="HTML")
+        
+    # Send all detailed reports
+    for jd_idx in sorted(analysis_results.keys()):
+        jd_data = analysis_results[jd_idx]
+        for res in jd_data["resumes"]:
+            report = res["report"]
             if len(report) > 4000:
                 parts = [report[i:i+4000] for i in range(0, len(report), 4000)]
                 for part in parts:
@@ -447,20 +468,6 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         await update.message.reply_text(part)
             else:
                 await update.message.reply_text(report, parse_mode="HTML")
-                
-            success_count += 1
-                
-        except Exception as e:
-            failed_count += 1
-            print(f"[Resume {idx}] Extraction/Analysis error: {e}")
-            import traceback
-            traceback.print_exc()
-            await update.message.reply_text(
-                f"<b>Resume #{idx}</b>\n"
-                f"Status: Analysis could not be completed.\n"
-                f"Reason: Resume content could not be extracted.",
-                parse_mode="HTML"
-            )
 
     if progress_msg:
         try:
