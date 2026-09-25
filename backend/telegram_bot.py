@@ -469,36 +469,7 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await update.message.reply_text(report, parse_mode="HTML")
 
-    if progress_msg:
-        try:
-            await progress_msg.edit_text(
-                f"<b>ANALYZING {num_targets} RESUMES...</b>\n\n"
-                f"I found {num_targets} resumes.\n"
-                f"I'll evaluate each resume against the uploaded Job Description.\n\n"
-                f"Progress:\n{success_count + failed_count}/{num_targets} completed",
-                parse_mode="HTML"
-            )
-        except Exception:
-            pass
-            
-    if num_targets > 1 and not context.args:
-        if success_count == num_targets:
-            msg = "Detailed evaluation reports have been generated for all uploaded resumes."
-        elif success_count > 0:
-            msg = f"Detailed evaluation reports have been generated for {success_count} of {num_targets} resumes."
-        else:
-            msg = "No evaluation reports could be generated because resume content could not be extracted."
-            
-        await update.message.reply_text(
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"<b>BATCH ANALYSIS COMPLETED</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"Total Resumes: {num_targets}\n"
-            f"Successfully Analyzed: {success_count}\n"
-            f"Failed: {failed_count}\n\n"
-            f"{msg}",
-            parse_mode="HTML"
-        )
+
 
 async def cmd_jd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
