@@ -24,8 +24,7 @@ sessions = {}
 def get_session(user_id):
     if user_id not in sessions:
         sessions[user_id] = {
-            "job_description": None,
-            "job_description_filename": None,
+            "job_descriptions": [],
             "expected_file_type": None,
             "resumes": [],
             "failed_uploads": []
@@ -35,8 +34,7 @@ def get_session(user_id):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     sessions[user_id] = {
-        "job_description": None,
-        "job_description_filename": None,
+        "job_descriptions": [],
         "expected_file_type": None,
         "resumes": [],
         "failed_uploads": []
@@ -53,8 +51,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def reset_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     sessions[user_id] = {
-        "job_description": None,
-        "job_description_filename": None,
+        "job_descriptions": [],
         "expected_file_type": None,
         "resumes": [],
         "failed_uploads": []
