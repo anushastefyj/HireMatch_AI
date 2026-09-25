@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+python-telegram-bot
+google-genai
+python-dotenv
+pypdf
+python-docx
