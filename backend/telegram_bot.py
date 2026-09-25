@@ -179,11 +179,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     expected = session.get("expected_file_type")
     
     if expected == 'jd':
-        session["job_description"] = text
-        session["expected_file_type"] = None
-        await update.message.reply_text(
-            "Job Description received successfully. Now send /resume to upload candidate resumes."
-        )
+        session.setdefault("job_descriptions", []).append({
+            "filename": "Pasted_JD_Text",
+            "text": text
+        })
     elif expected == 'resume':
         await update.message.reply_text("Please upload the resume as a file (PDF, DOCX, TXT, etc.).")
     else:
@@ -196,8 +195,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         is_jd = any(keyword in text_lower for keyword in jd_keywords) and len(text_lower.split()) > 5
         
-        if is_jd and not session.get("job_description"):
-            session["job_description"] = text
+        if is_jd and not session.get("job_descriptions"):
+            session.setdefault("job_descriptions", []).append({
+                "filename": "Pasted_JD_Text",
+                "text": text
+            })
             await update.message.reply_text(
                 "Job Description received successfully. Now send /resume to upload candidate resumes."
             )
@@ -495,11 +497,13 @@ async def cmd_jd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     session = get_session(user_id)
     session["expected_file_type"] = 'jd'
-    await update.message.reply_text("Please upload the Job Description file (PDF, DOCX, or TXT), or paste the Job Description text here.")
+    await update.message.reply_text("Please upload the Job Description files (PDF, DOCX, TXT) or paste the text here. You can upload multiple JDs continuously.")
 
 async def cmd_resume(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     session = get_session(user_id)
+    if not session.get("job_descriptions"):
+        await update.message.reply_text("It is recommended to provide a Job Description first using /jd, but you can upload resumes now.")
     session["expected_file_type"] = 'resume'
     await update.message.reply_text("Please upload the candidate resumes. You can upload multiple resumes one after another.")
 
