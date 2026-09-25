@@ -27,7 +27,8 @@ def get_session(user_id):
             "job_description": None,
             "job_description_filename": None,
             "expected_file_type": None,
-            "resumes": []
+            "resumes": [],
+            "failed_uploads": []
         }
     return sessions[user_id]
 
@@ -37,7 +38,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "job_description": None,
         "job_description_filename": None,
         "expected_file_type": None,
-        "resumes": []
+        "resumes": [],
+        "failed_uploads": []
     }
     
     welcome_msg = (
@@ -54,7 +56,8 @@ async def reset_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "job_description": None,
         "job_description_filename": None,
         "expected_file_type": None,
-        "resumes": []
+        "resumes": [],
+        "failed_uploads": []
     }
     await update.message.reply_text(
         "SESSION RESET\n\n"
@@ -84,8 +87,21 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     document = update.message.document
     file_name = document.file_name.lower() if document.file_name else ""
     
+    expected = session.get("expected_file_type")
+    
+    if expected is None:
+        await update.message.reply_text(
+            "Please tell me what you are uploading first:\n\n"
+            "/jd - Upload a Job Description\n"
+            "/resume - Upload candidate resumes"
+        )
+        return
+
     valid_extensions = (".pdf", ".docx", ".doc", ".txt", ".rtf", ".md")
     if not file_name.endswith(valid_extensions):
+        if expected == 'resume':
+            session.setdefault("failed_uploads", []).append(document.file_name or "Unknown File")
+            return
         await update.message.reply_text("Please upload the file in a supported format (PDF, DOCX, TXT, RTF, MD).")
         return
 
@@ -96,13 +112,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_path = os.path.join(UPLOADS_DIR, unique_filename)
         await file.download_to_drive(file_path)
     except Exception:
+        if expected == 'resume':
+            session.setdefault("failed_uploads", []).append(document.file_name or "Unknown File")
+            return
         await update.message.reply_text("There was an error downloading your file. Please try again.")
-        return
-
-    expected = session.get("expected_file_type")
-    
-    if expected is None:
-        await update.message.reply_text("Please use /jd before uploading a Job Description, or /resume before uploading a Resume.")
         return
 
     if expected == 'jd':
@@ -119,15 +132,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         session["expected_file_type"] = None
         
         msg = (
-            "JOB DESCRIPTION RECEIVED\n\n"
-            f"File: {document.file_name}\n\n"
-            "The Job Description has been successfully extracted and processed.\n\n"
-            "You can now send /resume to upload resumes for evaluation.\n\n"
-            "Available commands:\n\n"
-            "/resumes — View uploaded resumes\n"
-            "/analyze — Analyze all uploaded resumes\n"
-            "/analyze 1 — Analyze Resume #1\n"
-            "/analyze 2 — Analyze Resume #2"
+            "JD received successfully. Now send /resume to upload candidate resumes."
         )
         await update.message.reply_text(msg)
     elif expected == 'resume':
@@ -136,16 +141,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "path": file_path
         }
         session["resumes"].append(resume_data)
-        resume_index = len(session["resumes"])
-        
-        msg = (
-            "RESUME RECEIVED\n\n"
-            f"File: {document.file_name}\n"
-            f"Resume #: {resume_index}\n\n"
-            "The resume has been successfully added.\n\n"
-            "You can upload more resumes or use /analyze when ready."
-        )
-        await update.message.reply_text(msg)
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
@@ -197,9 +192,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         session["job_description"] = text
         session["expected_file_type"] = None
         await update.message.reply_text(
-            "JOB DESCRIPTION RECEIVED\n\n"
-            "The Job Description has been successfully processed.\n\n"
-            "You can now send /resume to upload resumes for evaluation."
+            "Job Description received successfully. Now send /resume to upload candidate resumes."
         )
     elif expected == 'resume':
         await update.message.reply_text("Please upload the resume as a file (PDF, DOCX, TXT, etc.).")
@@ -216,13 +209,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if is_jd and not session.get("job_description"):
             session["job_description"] = text
             await update.message.reply_text(
-                "JOB DESCRIPTION RECEIVED\n\n"
-                "The Job Description has been successfully processed.\n\n"
-                "You can now send /resume to upload resumes for evaluation."
+                "Job Description received successfully. Now send /resume to upload candidate resumes."
             )
         else:
             await update.message.reply_text(
-                "Please use /jd before uploading a Job Description, or /resume before uploading a Resume."
+                "Please tell me what you are uploading first:\n\n"
+                "/jd - Upload a Job Description\n"
+                "/resume - Upload candidate resumes"
             )
 
 async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -234,8 +227,13 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
         
     resumes = session.get("resumes", [])
-    if not resumes:
+    failed = session.get("failed_uploads", [])
+    
+    if not resumes and not failed:
         await update.message.reply_text("Please upload at least one PDF or DOCX resume first.")
+        return
+    elif not resumes and failed:
+        await update.message.reply_text(f"0 resumes added. {len(failed)} file(s) could not be processed. Please upload valid resumes.")
         return
         
     targets = []
@@ -248,6 +246,22 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
     else:
         targets = list(enumerate(resumes, 1))
+        
+        # Summary message output
+        total_received = len(resumes) + len(failed)
+        if not failed:
+            summary = f"{total_received} resume{'s' if total_received > 1 else ''} received successfully.\n\nFiles:\n"
+            for i, r in enumerate(resumes, 1):
+                summary += f"{i}. {r['filename']}\n"
+            summary += "\nStarting analysis..."
+        else:
+            summary = f"{total_received} file{'s' if total_received > 1 else ''} received.\n"
+            summary += f"{len(resumes)} resume{'s' if len(resumes) != 1 else ''} {'were' if len(resumes) != 1 else 'was'} successfully added.\n"
+            summary += f"{len(failed)} file{'s' if len(failed) > 1 else ''} could not be processed:\n\n"
+            for f in failed:
+                summary += f"• {f}\n"
+            summary += f"\nStarting analysis of {len(resumes)} resume{'s' if len(resumes) != 1 else ''}..."
+        await update.message.reply_text(summary)
         
     num_targets = len(targets)
     progress_msg = None
@@ -491,16 +505,13 @@ async def cmd_jd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     session = get_session(user_id)
     session["expected_file_type"] = 'jd'
-    await update.message.reply_text("Please upload the Job Description document or paste the Job Description text.")
+    await update.message.reply_text("Please upload the Job Description file (PDF, DOCX, or TXT), or paste the Job Description text here.")
 
 async def cmd_resume(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     session = get_session(user_id)
-    if not session.get("job_description"):
-        await update.message.reply_text("It is recommended to provide a Job Description first using /jd, but you can upload resumes now. Please upload your resume documents (PDF, DOCX, etc.).")
-    else:
-        await update.message.reply_text("Please upload your resume documents (PDF, DOCX, etc.).")
     session["expected_file_type"] = 'resume'
+    await update.message.reply_text("Please upload the candidate resumes. You can upload multiple resumes one after another.")
 
 from gemini_service import analyze_resume_with_gemini, test_gemini_connection
 
@@ -515,6 +526,7 @@ def create_bot():
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("reset", reset_session))
+    application.add_handler(CommandHandler("clear", reset_session))
     application.add_handler(CommandHandler("resumes", list_resumes))
     application.add_handler(CommandHandler("analyze", analyze))
     application.add_handler(CommandHandler("jd", cmd_jd))
