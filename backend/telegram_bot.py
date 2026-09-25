@@ -96,7 +96,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     valid_extensions = (".pdf", ".docx", ".doc", ".txt", ".rtf", ".md")
     if not file_name.endswith(valid_extensions):
-        if expected == 'resume':
+        if expected in ('resume', 'jd'):
             session.setdefault("failed_uploads", []).append(document.file_name or "Unknown File")
             return
         await update.message.reply_text("Please upload the file in a supported format (PDF, DOCX, TXT, RTF, MD).")
@@ -109,7 +109,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_path = os.path.join(UPLOADS_DIR, unique_filename)
         await file.download_to_drive(file_path)
     except Exception:
-        if expected == 'resume':
+        if expected in ('resume', 'jd'):
             session.setdefault("failed_uploads", []).append(document.file_name or "Unknown File")
             return
         await update.message.reply_text("There was an error downloading your file. Please try again.")
@@ -118,20 +118,13 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if expected == 'jd':
         text = extract_resume_text(file_path)
         if not text or len(re.sub(r'[^a-zA-Z0-9]', '', text)) < 20:
-            if file_path.endswith(".pdf"):
-                await update.message.reply_text(f"Text could not be extracted from {document.file_name}. It may be a scanned/image-based document. Please upload a text-based document.")
-            else:
-                await update.message.reply_text(f"Sorry, I couldn't extract readable text from {document.file_name}.\nPlease upload the file as PDF or DOCX.")
+            session.setdefault("failed_uploads", []).append(document.file_name or "Unknown File")
             return
             
-        session["job_description"] = text
-        session["job_description_filename"] = document.file_name
-        session["expected_file_type"] = None
-        
-        msg = (
-            "JD received successfully. Now send /resume to upload candidate resumes."
-        )
-        await update.message.reply_text(msg)
+        session.setdefault("job_descriptions", []).append({
+            "filename": document.file_name,
+            "text": text
+        })
     elif expected == 'resume':
         resume_data = {
             "filename": document.file_name,
