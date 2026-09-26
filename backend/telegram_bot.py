@@ -1,6 +1,7 @@
 import os
 import uuid
 import re
+import traceback
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -82,7 +83,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     session = get_session(user_id)
     
     document = update.message.document
-    file_name = document.file_name.lower() if document.file_name else ""
+    original_filename = document.file_name if document.file_name else "Unknown File"
+    file_name = original_filename.lower()
     
     expected = session.get("expected_file_type")
     
@@ -96,10 +98,9 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     valid_extensions = (".pdf", ".docx", ".doc", ".txt", ".rtf", ".md")
     if not file_name.endswith(valid_extensions):
-        if expected in ('resume', 'jd'):
-            session.setdefault("failed_uploads", []).append(document.file_name or "Unknown File")
-            return
-        await update.message.reply_text("Please upload the file in a supported format (PDF, DOCX, TXT, RTF, MD).")
+        session.setdefault("failed_uploads", []).append(original_filename)
+        if expected == 'jd':
+            await update.message.reply_text(f"File could not be processed: {original_filename}\n\nReason: Unsupported file format.")
         return
 
     try:
@@ -108,26 +109,44 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         unique_filename = f"file_{uuid.uuid4()}{ext}"
         file_path = os.path.join(UPLOADS_DIR, unique_filename)
         await file.download_to_drive(file_path)
-    except Exception:
-        if expected in ('resume', 'jd'):
-            session.setdefault("failed_uploads", []).append(document.file_name or "Unknown File")
-            return
-        await update.message.reply_text("There was an error downloading your file. Please try again.")
+    except Exception as e:
+        session.setdefault("failed_uploads", []).append(original_filename)
+        print(f"Error downloading {original_filename}: {e}")
+        traceback.print_exc()
+        if expected == 'jd':
+            await update.message.reply_text(f"File could not be processed: {original_filename}\n\nReason: Download error: {str(e)}\n\nPlease check the terminal logs.")
         return
 
     if expected == 'jd':
-        text = extract_resume_text(file_path)
-        if not text or len(re.sub(r'[^a-zA-Z0-9]', '', text)) < 20:
-            session.setdefault("failed_uploads", []).append(document.file_name or "Unknown File")
-            return
+        try:
+            text = extract_resume_text(file_path)
+            if not text or len(re.sub(r'[^a-zA-Z0-9]', '', text)) < 20:
+                raise ValueError("Extracted text is empty or too short.")
+                
+            session.setdefault("job_descriptions", []).append({
+                "filename": original_filename,
+                "text": text
+            })
             
-        session.setdefault("job_descriptions", []).append({
-            "filename": document.file_name,
-            "text": text
-        })
+            num_jds = len(session["job_descriptions"])
+            await update.message.reply_text(
+                f"JD {num_jds} received: {original_filename}\n\n"
+                f"Total Job Descriptions: {num_jds}\n\n"
+                "You can upload another JD or send /resume to upload resumes."
+            )
+        except Exception as e:
+            session.setdefault("failed_uploads", []).append(original_filename)
+            print(f"Error processing JD {original_filename}: {e}")
+            traceback.print_exc()
+            idx = len(session.get("job_descriptions", [])) + 1
+            await update.message.reply_text(
+                f"JD {idx} could not be processed: {original_filename}\n\n"
+                f"Reason: {str(e)}\n\n"
+                "Please check the terminal logs."
+            )
     elif expected == 'resume':
         resume_data = {
-            "filename": document.file_name,
+            "filename": original_filename,
             "path": file_path
         }
         session["resumes"].append(resume_data)
@@ -183,6 +202,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "filename": "Pasted_JD_Text",
             "text": text
         })
+        num_jds = len(session["job_descriptions"])
+        await update.message.reply_text(
+            f"JD {num_jds} received: Pasted_JD_Text\n\n"
+            f"Total Job Descriptions: {num_jds}\n\n"
+            "You can upload another JD or send /resume to upload resumes."
+        )
     elif expected == 'resume':
         await update.message.reply_text("Please upload the resume as a file (PDF, DOCX, TXT, etc.).")
     else:
