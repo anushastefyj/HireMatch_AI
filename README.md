@@ -1,26 +1,41 @@
 # HireMatch AI
 
-HireMatch AI is an intelligent Telegram bot designed to streamline the recruitment process. It allows recruiters or hiring managers to upload a Job Description (JD) and candidate resumes to automatically evaluate and score them for compatibility. 
+HireMatch AI is an intelligent Telegram bot designed to streamline the recruitment process. It allows recruiters to upload **Multiple Job Descriptions (JDs)** and **Multiple Resumes** at once and automatically evaluates compatibility with ATS scoring and side-by-side comparison.
+
+## 🚀 What's New - Updated Flow
+- **Intent-Based Upload**: No more "first file = JD" confusion. Bot now asks what you are uploading.
+- **Multiple JD Support**: You can upload more than 1 JD to compare which candidate fits which role best.
+- **Comparison Table Mode**: If >1 JD is provided, the bot auto-switches to a comparison table format showing each resume's score against each JD.
+- **Bulk Resume Handling**: Once you send `/resume`, you can upload 10+ resumes back-to-back without retyping the command.
 
 ## Features
-- **Telegram Bot Interface**: Easy-to-use conversational interface right inside Telegram.
-- **Resume Parsing**: Supports extracting text from various document formats (PDF, DOCX, TXT, RTF, MD).
-- **AI-Powered Analysis**: Utilizes Google's Gemini AI to deeply analyze the candidate's alignment with the role.
-- **ATS Scoring System**: Calculates an Applicant Tracking System (ATS) score based on required skills, keyword coverage, education, and experience.
-- **Detailed Evaluation Reports**: Provides a comprehensive breakdown including skill alignment (matched vs. missing), key strengths, and a recruitment summary.
-- **Course Recommendations**: Suggests learning resources for candidates to bridge identified skill gaps.
-- **Batch Processing**: Upload multiple resumes and analyze them all at once against the target Job Description.
+- **Telegram Bot Interface**: Easy conversational flow with `/jd`, `/resume`, `/analyze` commands.
+- **Smart State Tracking**: Tracks `expected_file_type` to know if next file is a JD or a Resume.
+- **Resume Parsing**: Supports PDF, DOCX, TXT, RTF, MD.
+- **AI-Powered Analysis**: Uses Google Gemini AI for deep skill alignment beyond keyword matching.
+- **Advanced ATS Scoring**: Calculates score out of 100 based on Skills (50%), Experience (20%), Education (15%), Keywords (15%).
+- **Detailed Reports**: For each candidate: Matched Skills, Missing Skills, Strengths, Verdict, Course Recommendations.
+- **Comparison Table Report**: When multiple JDs are present -> `| Candidate | JD1 ATS | JD2 ATS | Matched | Missing | Best Fit |`
+- **Course Recommendations**: Suggests courses for missing skills.
 
 ## Project Structure
-- **`telegram_bot.py`**: The core Telegram bot logic and message handlers.
-- **`gemini_service.py`**: Integration with Google Gemini for AI-driven resume analysis.
-- **`resume_parser.py`**: Utilities for extracting text from different file formats.
-- **`local_analyzer.py` / `matcher.py` / `scorer.py`**: Local fallback logic for skill matching, keyword tracking, and ATS score calculation.
-- **`course_recommender.py`**: Recommends relevant courses based on missing skills.
+- **`telegram_bot.py`**: Core bot logic, handles `/jd`, `/resume`, `/analyze`, `/reset` and state tracking `expected_file_type`.
+- **`gemini_service.py`**: Gemini integration with new prompt for multi-JD comparison table logic.
+- **`resume_parser.py`**: Text extraction from all formats.
+- **`local_analyzer.py` / `scorer.py`**: Fallback ATS calculation.
+- **`course_recommender.py`**: Maps missing skills to courses.
 
-## How to Use
-1. Start the bot on Telegram and send the `/start` command.
-2. Send `/jd` and provide your Job Description (by uploading a file or pasting the text).
-3. Send `/resume` and upload one or more candidate resumes.
-4. Use `/analyze` to receive a detailed matching report for all uploaded candidates.
-5. Use `/reset` to clear the current session and start a new evaluation.
+## How to Use - New Flow
+1. Start bot -> `/start`
+2. Send `/jd` -> Upload JD file(s). You can send `/jd` again to add a 2nd or 3rd JD for comparison. Bot says "JD 1 saved", "JD 2 saved".
+3. Send `/resume` -> Now upload all candidate resumes one by one. Bot will keep adding them.
+4. Send `/analyze` -> 
+   - If 1 JD: Get detailed report per resume (ATS, Matched/Missing skills, Summary)
+   - If >1 JD: Get comparison table showing each resume's score vs each JD + Final Recommendation (Best JD for each candidate)
+5. `/reset` to clear session.
+
+## Example Output
+| Candidate | JD 1: Python Dev | JD 2: Data Analyst | Verdict |
+| :--- | :--- | :--- | :--- |
+| Ramesh.pdf | 82% | 45% | Best for JD 1 |
+| Priya.docx | 55% | 91% | Best for JD 2 |
