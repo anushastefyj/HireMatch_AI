@@ -129,91 +129,97 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
     jds = session.get("job_descriptions", [])
     resumes = session.get("resumes", [])
 
-    if not jds:
-        await update.message.reply_text("Provide JD first using /jd")
-        return
-    if not resumes:
-        await update.message.reply_text("Upload resumes using /resume")
+    if not jds or not resumes:
+        await update.message.reply_text("Need at least 1 JD and 1 resume")
         return
 
-    await update.message.reply_text(f"Analysis started.\nJDs: {len(jds)} | Resumes: {len(resumes)} | Total comparisons: {len(jds)*len(resumes)}")
+    print(f"[DEBUG] Starting analysis: {len(jds)} JDs x {len(resumes)} resumes")
+    await update.message.reply_text(f"Analysis started.\nJDs: {len(jds)} | Resumes: {len(resumes)} | Comparisons: {len(jds)*len(resumes)}\nThis will take 20-30 sec...")
 
     from local_analyzer import analyze_resume_local
-    results_matrix = [] # List of {resume_name, scores: [ {jd_name, ats, matched, missing} ] }
+    from gemini_service import analyze_resume_with_gemini
+    import asyncio
 
-    for r in resumes:
-        resume_entry = {"resume_name": r["filename"], "comparisons": []}
-        for jd_idx, jd in enumerate(jds):
-            try:
-                local_res = analyze_resume_local(jd["text"], r["text"])
-                gemini_res = analyze_resume_with_gemini(jd["text"], r["text"], r["filename"])
-                final = {**local_res, **gemini_res} if "error" not in gemini_res else local_res
+    results_matrix = []
 
-                resume_entry["comparisons"].append({
-                    "jd_name": jd["filename"],
-                    "jd_idx": jd_idx+1,
-                    "ats": final.get("ats_score", 0),
-                    "matched": final.get("matched_skills", []),
-                    "missing": final.get("missing_skills", []),
-                    "full_report": final
-                })
-            except Exception as e:
-                traceback.print_exc()
-                resume_entry["comparisons"].append({"jd_name": jd["filename"], "jd_idx": jd_idx+1, "ats": 0, "matched": [], "missing": [], "full_report": {}})
-        results_matrix.append(resume_entry)
+    try:
+        for r in resumes:
+            entry = {"resume_name": r["filename"], "comparisons": []}
+            for jd_idx, jd in enumerate(jds):
+                try:
+                    # 1. Local is fast - always works
+                    local_res = analyze_resume_local(jd["text"], r["text"])
+                    ats = local_res.get("ats_score", 0)
+                    matched = local_res.get("matched_skills", [])
+                    missing = local_res.get("missing_skills", [])
 
-    # ---- BUILD COMPARISON TABLE IF MULTI JD ----
-    if len(jds) > 1:
-        table = "<b>📊 COMPARISON TABLE - MULTI JD ANALYSIS</b>\n\n"
-        table += "<pre>"
-        header = f"{'Candidate':<20} |"
-        for j in range(len(jds)):
-            header += f" JD{j+1} ATS |"
-        header += " Best Fit\n"
-        table += header
-        table += "-"*len(header) + "\n"
+                    # 2. Gemini - try but don't crash if fails
+                    try:
+                        # Run gemini in thread so it doesn't block bot
+                        gemini_res = await asyncio.to_thread(analyze_resume_with_gemini, jd["text"], r["text"], r["filename"])
+                        if "error" not in gemini_res:
+                            ats = gemini_res.get("ats_score", ats)
+                            matched = gemini_res.get("matched_skills", matched)
+                            missing = gemini_res.get("missing_skills", missing)
+                    except Exception as g_err:
+                        print(f"Gemini failed for {r['filename']} x JD{jd_idx+1}: {g_err}")
+                        # Use local result only
 
-        for entry in results_matrix:
-            row = f"{entry['resume_name'][:18]:<20} |"
-            best_ats = -1
-            best_jd = 1
-            for comp in entry["comparisons"]:
-                row += f" {comp['ats']:^7} |"
-                if comp['ats'] > best_ats:
-                    best_ats = comp['ats']
-                    best_jd = comp['jd_idx']
-            row += f" JD{best_jd} ({best_ats}%)\n"
-            table += row
-        table += "</pre>\n\n"
+                    entry["comparisons"].append({
+                        "jd_name": jd["filename"],
+                        "jd_idx": jd_idx+1,
+                        "ats": ats,
+                        "matched": matched,
+                        "missing": missing
+                    })
+                    print(f"[OK] {r['filename']} vs JD{jd_idx+1} -> {ats}%")
 
-        # Detailed matched/missing per resume
-        for entry in results_matrix:
-            table += f"<b>{html.escape(entry['resume_name'])}</b>\n"
-            for comp in entry["comparisons"]:
-                matched_str = ", ".join(comp['matched'][:5]) if comp['matched'] else "None"
-                missing_str = ", ".join(comp['missing'][:5]) if comp['missing'] else "None"
-                table += f" JD{comp['jd_idx']} ({html.escape(comp['jd_name'])}): ATS {comp['ats']}/100\n"
-                table += f" Matched: {html.escape(matched_str)}\n"
-                table += f" Missing: {html.escape(missing_str)}\n"
-            table += "\n"
+                except Exception as e:
+                    print(f"[FAIL] {r['filename']} vs JD{jd_idx+1}: {e}")
+                    traceback.print_exc()
+                    entry["comparisons"].append({"jd_name": jd["filename"], "jd_idx": jd_idx+1, "ats": 0, "matched": [], "missing": []})
 
-        # Send table in chunks
-        for i in range(0, len(table), 4000):
-            await update.message.reply_text(table[i:i+4000], parse_mode="HTML")
-    else:
-        # Single JD detailed reports (your existing detailed report logic)
-        for entry in results_matrix:
-            comp = entry["comparisons"][0]
-            full = comp["full_report"]
-            report = (
-                f"━━━━━━━━━━━━\n<b>{html.escape(entry['resume_name'])}</b>\n"
-                f"JD: {html.escape(comp['jd_name'])}\n"
-                f"ATS Score: {comp['ats']}/100\n"
-                f"Matched: {html.escape(', '.join(comp['matched']))}\n"
-                f"Missing: {html.escape(', '.join(comp['missing']))}\n\n"
-                f"<b>Summary:</b> {html.escape(full.get('recruitment_summary',''))}\n"
-            )
-            await update.message.reply_text(report, parse_mode="HTML")
+            results_matrix.append(entry)
+
+        # --- BUILD COMPARISON TABLE (GUARANTEED TO SEND) ---
+        if len(jds) > 1:
+            table = f"<b>📊 COMPARISON TABLE - {len(resumes)} Resumes vs {len(jds)} JDs</b>\n\n"
+            table += "<pre>"
+            header = f"{'Candidate':<18} |"
+            for j in range(len(jds)): header += f" JD{j+1} |"
+            header += " Best\n"
+            table += header + "-"*40 + "\n"
+            for entry in results_matrix:
+                best = max(entry["comparisons"], key=lambda x: x["ats"])
+                row = f"{entry['resume_name'][:16]:<18} |"
+                for comp in entry["comparisons"]:
+                    row += f" {comp['ats']:>3}% |"
+                row += f" JD{best['jd_idx']}\n"
+                table += row
+            table += "</pre>\n\n"
+
+            for entry in results_matrix:
+                table += f"<b>{html.escape(entry['resume_name'])}</b>\n"
+                for comp in entry["comparisons"]:
+                    table += f" JD{comp['jd_idx']}: ATS {comp['ats']} | Matched: {', '.join(comp['matched'][:4])} | Missing: {', '.join(comp['missing'][:4])}\n"
+                table += "\n"
+
+            await update.message.reply_text(table[:4000], parse_mode="HTML")
+            if len(table) > 4000:
+                await update.message.reply_text(table[4000:8000], parse_mode="HTML")
+        else:
+            # Single JD report
+            for entry in results_matrix:
+                comp = entry["comparisons"][0]
+                msg = f"<b>{html.escape(entry['resume_name'])}</b>\nATS: {comp['ats']}/100\nMatched: {html.escape(', '.join(comp['matched']))}\nMissing: {html.escape(', '.join(comp['missing']))}"
+                await update.message.reply_text(msg, parse_mode="HTML")
+
+        await update.message.reply_text("✅ Analysis Complete. Send /reset for new session.")
+
+    except Exception as main_e:
+        print(f"[CRITICAL ERROR in analyze]: {main_e}")
+        traceback.print_exc()
+        await update.message.reply_text(f"Analysis failed: {str(main_e)}\nCheck terminal logs. But your resumes were parsed. Try again with /analyze")
 
 def create_bot():
     application = Application.builder().token(TOKEN).build()
